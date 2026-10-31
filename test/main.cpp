@@ -262,7 +262,7 @@ static void testFilesAndBadData() {
     Replay<> replay("Bot", 1);
     replay.inputs.emplace_back(4, 1, false, true);
 
-    auto path = std::filesystem::temp_directory_path() / "libgdr_test.gdr";
+    auto path = std::filesystem::temp_directory_path() / "libgdr_test.gdr2";
     assert(replay.exportData(path).isOk());
     auto imported = Replay<>::importData(path);
     assert(imported.isOk());
