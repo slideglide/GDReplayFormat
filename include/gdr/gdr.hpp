@@ -1,8 +1,10 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
+#include <type_traits>
 #include <variant>
 
 #include "binarystream.hpp"
@@ -38,9 +40,13 @@ public:
     /// @brief Unwraps the value as rvalue if it is Ok, otherwise throws bad_variant_access exception.
     constexpr OkType& unwrap() && { return std::get<OkContainer>(value).value; }
     /// @brief Unwraps the value if it is Ok, otherwise throws bad_variant_access exception.
+    [[nodiscard]] constexpr OkType& unwrap() & { return std::get<OkContainer>(value).value; }
+    /// @brief Unwraps the value if it is Ok, otherwise throws bad_variant_access exception.
     [[nodiscard]] constexpr const OkType& unwrap() const & { return std::get<OkContainer>(value).value; }
     /// @brief Unwraps the error as rvalue if it is Err, otherwise throws bad_variant_access exception.
     constexpr ErrType& unwrapErr() && { return std::get<ErrContainer>(value).value; }
+    /// @brief Unwraps the error if it is Err, otherwise throws bad_variant_access exception.
+    [[nodiscard]] constexpr ErrType& unwrapErr() & { return std::get<ErrContainer>(value).value; }
     /// @brief Unwraps the error if it is Err, otherwise throws bad_variant_access exception.
     [[nodiscard]] constexpr const ErrType& unwrapErr() const & { return std::get<ErrContainer>(value).value; }
 
@@ -58,7 +64,7 @@ private:
     std::variant<OkContainer, ErrContainer> value;
 };
 
-template <typename O = OkTag, typename E = std::string>
+template <typename O = OkTag, typename E = std::string> requires (!std::is_reference_v<O>)
 constexpr Result<O, E> Ok(O&& value) { return Result<O, E>(OkContainer<O>(std::forward<O>(value))); }
 
 template <typename O = OkTag, typename E = std::string>
@@ -70,11 +76,11 @@ constexpr Result<std::string, E> Ok(const char (&value)[S]) { return Ok<std::str
 template <typename O = OkTag, typename E = std::string>
 constexpr Result<O, E> Ok() { return Ok<O, E>(O()); }
 
-template <typename O = OkTag, typename E = std::string>
+template <typename O = OkTag, typename E = std::string> requires (!std::is_reference_v<E>)
 constexpr Result<O, E> Err(E&& value) { return Result<O, E>(ErrContainer<E>(std::forward<E>(value))); }
 
 template <typename O = OkTag, typename E = std::string>
-constexpr Result<O, E> Err(const E& value) { return Err<O, E>(value); }
+constexpr Result<O, E> Err(const E& value) { return Err<O, E>(E(value)); }
 
 template <typename O = OkTag, size_t S>
 constexpr Result<O, std::string> Err(const char (&value)[S]) { return Err<O, std::string>(std::string(value)); }
@@ -178,6 +184,11 @@ public:
     Replay(std::string const& botName, int botVersion)
         : botInfo(botName, botVersion) {}
 
+    Replay(const Replay&) = default;
+    Replay(Replay&&) noexcept = default;
+    Replay& operator=(const Replay&) = default;
+    Replay& operator=(Replay&&) noexcept = default;
+
     virtual ~Replay() = default;
     /// @brief Override this function to access the extension data.
     virtual void parseExtension(binary_reader& reader) {}
@@ -192,14 +203,13 @@ public:
 
     /// @brief Sort the inputs by frame number.
     void sortInputs() {
-        std::stable_sort(inputs.begin(), inputs.end(), [](const InputType& a, const InputType& b) {
-            return a.frame < b.frame;
-        });
+        std::ranges::stable_sort(inputs, {}, &InputType::frame);
     }
 
     /// @brief Export the replay to a byte array. Returns an error if the data is invalid.
     [[nodiscard]] Result<std::vector<uint8_t>> exportData() {
         binary_writer stream;
+        stream.data().reserve(256 + inputs.size() * (input_has_extension ? 48 : 3));
 
         stream << "GDR" << version << std::string(InputType::tag)
                 << author << description
@@ -223,54 +233,30 @@ public:
 
         stream << inputs.size();
 
-        // write number of player 1 inputs
-        size_t p1Inputs = std::count_if(inputs.begin(), inputs.end(), [](const InputType& input) { return !input.player2; });
+        size_t p1Inputs = std::ranges::count_if(inputs, [](const InputType& input) { return !input.player2; });
         stream << p1Inputs;
 
-        // save player 1 inputs
-        p = 0;
-        for (const InputType& input : inputs) {
-            if (input.player2) continue;
+        binary_writer inputExtensionStream;
+        for (bool player2 : {false, true}) {
+            p = 0;
+            for (const InputType& input : inputs) {
+                if (input.player2 != player2) continue;
 
-            uint64_t packed = 0;
-            if (platformer) {
-                packed = InputChunk(input.frame - p, input.button, input.down);
-            } else {
-                packed = InputChunkNP(input.frame - p, input.down);
+                if (platformer) {
+                    stream << uint64_t(InputChunk(input.frame - p, input.button, input.down));
+                } else {
+                    stream << uint64_t(InputChunkNP(input.frame - p, input.down));
+                }
+
+                if constexpr (input_has_extension) {
+                    inputExtensionStream.clear();
+                    input.saveExtension(inputExtensionStream);
+                    stream << inputExtensionStream.size();
+                    stream.write(inputExtensionStream.data().data(), inputExtensionStream.size());
+                }
+
+                p = input.frame;
             }
-            stream << packed;
-
-            if constexpr (input_has_extension) {
-                binary_writer inputExtensionStream;
-                input.saveExtension(inputExtensionStream);
-                stream << inputExtensionStream.size();
-                stream.write(inputExtensionStream.data().data(), inputExtensionStream.size());
-            }
-
-            p = input.frame;
-        }
-
-        // save player 2 inputs
-        p = 0;
-        for (const InputType& input : inputs) {
-            if (!input.player2) continue;
-
-            uint64_t packed = 0;
-            if (platformer) {
-                packed = InputChunk(input.frame - p, input.button, input.down);
-            } else {
-                packed = InputChunkNP(input.frame - p, input.down);
-            }
-            stream << packed;
-
-            if constexpr (input_has_extension) {
-                binary_writer inputExtensionStream;
-                input.saveExtension(inputExtensionStream);
-                stream << inputExtensionStream.size();
-                stream.write(inputExtensionStream.data().data(), inputExtensionStream.size());
-            }
-
-            p = input.frame;
         }
 
         return Ok(std::move(stream.release()));
@@ -313,7 +299,7 @@ public:
         bool hasInputExt = !inputTag.empty();                  // if input extension is present in the file
         bool shouldParseInputExt = inputTag == InputType::tag; // if input extension should be parsed (matches the tag)
 
-        size_t extensionSize;
+        size_t extensionSize = 0;
         stream >> extensionSize;
         if (extensionSize > stream.size()) {
             return Err<Self>("Invalid extension size");
@@ -326,29 +312,35 @@ public:
             r.parseExtension(extensionStream);
         }
 
-        size_t sizes;
+        size_t sizes = 0;
         stream >> sizes;
-        r.deaths.reserve(sizes);
+        r.deaths.reserve(std::min(sizes, stream.size()));
 
         uint64_t p = 0;
         for(size_t i = 0; i < sizes; i++) {
-            uint64_t delta;
+            uint64_t delta = 0;
+            const size_t before = stream.size();
             stream >> delta;
+            if (stream.size() == before) return Err<Self>("Invalid death data");
             r.deaths.push_back(delta + p);
             p += delta;
         }
 
         stream >> sizes;
-        r.inputs.reserve(sizes);
+        r.inputs.reserve(std::min(sizes, stream.size()));
 
-        size_t p1Inputs;
+        size_t p1Inputs = 0;
         stream >> p1Inputs;
+        const size_t p1Count = p1Inputs;
+        bool framesAscending = true;
 
         p = 0;
         while (!stream.empty()) {
             InputType input;
-            uint64_t packed;
+            uint64_t packed = 0;
+            const size_t before = stream.size();
             stream >> packed;
+            if (stream.size() == before) return Err<Self>("Invalid input data");
             
             if (r.platformer) {
                 auto chunk = InputChunk(packed);
@@ -365,7 +357,7 @@ public:
             }
 
             if (hasInputExt) {
-                size_t inputExtensionSize;
+                size_t inputExtensionSize = 0;
                 stream >> inputExtensionSize;
                 if (inputExtensionSize > stream.size()) {
                     return Err<Self>("Invalid input extension size");
@@ -379,6 +371,7 @@ public:
                 }
             }
 
+            framesAscending &= input.frame >= p;
             r.inputs.push_back(std::move(input));
             p = input.frame;
 
@@ -391,8 +384,13 @@ public:
             }
         }
 
-        // sort inputs because right now p2 inputs are after p1 inputs (we want them to be interleaved)
-        r.sortInputs();
+        // p2 inputs are after p1 inputs so merge them, sort if frames are out of order
+        if (framesAscending) {
+            auto split = r.inputs.begin() + std::min(p1Count, r.inputs.size());
+            std::ranges::inplace_merge(r.inputs, split, {}, &InputType::frame);
+        } else {
+            r.sortInputs();
+        }
 
         return Ok(std::move(r));
     }

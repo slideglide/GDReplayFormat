@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstdint>
 #include <cstring>
@@ -11,112 +12,102 @@
 #include <vector>
 
 namespace detail {
-    /// @brief Get the bytes of any type.
+    /// @brief Reverse the bytes of a value.
+    template <size_t N>
+    inline std::array<uint8_t, N> reverseBytes(std::array<uint8_t, N> raw) noexcept {
+        if constexpr (N == 4) {
+            return std::bit_cast<std::array<uint8_t, N>>(std::byteswap(std::bit_cast<uint32_t>(raw)));
+        } else if constexpr (N == 8) {
+            return std::bit_cast<std::array<uint8_t, N>>(std::byteswap(std::bit_cast<uint64_t>(raw)));
+        } else {
+            std::ranges::reverse(raw);
+            return raw;
+        }
+    }
+
+    /// @brief Append the bytes of any type.
     template <typename T>
-    static std::vector<uint8_t> getBytes(const T& data) noexcept {
-        std::vector<uint8_t> bytes(sizeof(T));
-        std::memcpy(bytes.data(), &data, sizeof(T));
+    inline void appendBytes(std::vector<uint8_t>& out, const T& data) noexcept {
+        auto raw = std::bit_cast<std::array<uint8_t, sizeof(T)>>(data);
 
         if constexpr (std::endian::native == std::endian::little) {
-            std::reverse(bytes.begin(), bytes.end());
+            raw = reverseBytes(raw);
         }
 
-        return bytes;
+        out.insert(out.end(), raw.begin(), raw.end());
     }
 
-    /// @brief Get the bytes of an integral type in a variable-length format
+    /// @brief Append an integral type in a variable-length format.
     template <typename T> requires std::is_integral_v<T>
-    static std::vector<uint8_t> getBytes(const T& data) noexcept {
+    inline void appendBytes(std::vector<uint8_t>& out, const T& data) noexcept {
         uint64_t value = data;
-        std::vector<uint8_t> bytes;
 
-        if (value == 0) {
-            bytes.push_back(0);
-            return bytes;
-        }
-
-        while (value > 0) {
-            uint8_t byte = value & 0x7F;
+        while (value > 0x7F) {
+            out.push_back(static_cast<uint8_t>(value & 0x7F) | 0x80);
             value >>= 7;
-            if (value > 0) {
-                byte |= 0x80;
-            }
-            bytes.push_back(byte);
         }
-        return bytes;
+        out.push_back(static_cast<uint8_t>(value));
     }
 
-    /// @brief Get the bytes of a string with a prefixed length.
-    static std::vector<uint8_t> getBytes(const std::string& data) noexcept {
-        std::vector<uint8_t> bytes;
-        const auto length = getBytes(data.size());
-        bytes.insert(bytes.end(), length.begin(), length.end());
-        bytes.insert(bytes.end(), data.begin(), data.end());
-        return bytes;
+    /// @brief Append a string with a prefixed length.
+    inline void appendBytes(std::vector<uint8_t>& out, const std::string& data) noexcept {
+        appendBytes(out, data.size());
+        out.insert(out.end(), data.begin(), data.end());
     }
 
     template <size_t N>
-    static std::vector<uint8_t> getBytes(const char (&data)[N]) noexcept {
-        std::vector<uint8_t> bytes;
-        bytes.insert(bytes.end(), data, data + N - 1);
-        return bytes;
+    inline void appendBytes(std::vector<uint8_t>& out, const char (&data)[N]) noexcept {
+        out.insert(out.end(), data, data + N - 1);
     }
 
     /// @brief Read a value from a span of bytes and return the value and the size of the value.
     template <typename T>
-    static size_t consume(T& result, std::span<uint8_t> data) noexcept {
+    inline size_t consume(T& result, std::span<uint8_t> data) noexcept {
         if (data.size() < sizeof(T)) return 0;
 
-        std::memcpy(&result, data.data(), sizeof(T));
+        std::array<uint8_t, sizeof(T)> raw;
+        std::ranges::copy_n(data.begin(), sizeof(T), raw.begin());
 
         if constexpr (std::endian::native == std::endian::little) {
-            std::reverse(reinterpret_cast<uint8_t*>(&result), reinterpret_cast<uint8_t*>(&result) + sizeof(T));
+            raw = reverseBytes(raw);
         }
+
+        result = std::bit_cast<T>(raw);
 
         return sizeof(T);
     }
 
     /// @brief Read a variable-length value from a span of bytes and return the value and the size of the value.
     template <typename T> requires std::is_integral_v<T>
-    static size_t consume(T& result, std::span<uint8_t> data) noexcept {
-        result = 0;
+    inline size_t consume(T& result, std::span<uint8_t> data) noexcept {
+        uint64_t value = 0;
         size_t size = 0;
-        for (size_t i = 0; i <= sizeof(T); i++) {
+        for (size_t i = 0; i < 10; i++) {
             if (i >= data.size()) return 0;
-            result |= (data[i] & 0x7F) << (i * 7);
+            value |= static_cast<uint64_t>(data[i] & 0x7F) << (i * 7);
             size++;
             if ((data[i] & 0x80) == 0) {
                 break;
             }
         }
+        result = static_cast<T>(value);
         return size;
     }
 
     /// @brief Read a string with a prefixed length from a span of bytes and return the value and the size of the value.
-    static size_t consume(std::string& result, std::span<uint8_t> data) noexcept {
+    inline size_t consume(std::string& result, std::span<uint8_t> data) noexcept {
         size_t stringLen = 0;
         size_t sizeLen = consume(stringLen, data);
 
         if (data.size() < sizeLen + stringLen) return 0;
         if (stringLen > 0xFFFF) return 0;
 
-        result = std::string(
-            data.begin() + static_cast<int32_t>(sizeLen),
-            data.begin() + static_cast<int32_t>(sizeLen + stringLen)
-        );
+        result.assign(reinterpret_cast<const char*>(data.data() + sizeLen), stringLen);
         return sizeLen + stringLen;
     }
 
-    template <size_t N>
-    static size_t consume(char (&result)[N], std::span<uint8_t> data) noexcept {
-        if (data.size() < N) return 0;
-        std::memcpy(result, data.data(), N);
-        result[N] = '\0';
-        return N;
-    }
-
     template <size_t S>
-    static size_t consume(std::array<char, S>& result, std::span<uint8_t> data) noexcept {
+    inline size_t consume(std::array<char, S>& result, std::span<uint8_t> data) noexcept {
         if (data.size() < S) return 0;
         std::memcpy(result.data(), data.data(), S);
         return S;
@@ -146,8 +137,7 @@ public:
             return;
         }
 
-        const auto bytes = std::vector(m_data.begin(), m_data.begin() + static_cast<int32_t>(size));
-        std::memcpy(data, bytes.data(), size);
+        std::memcpy(data, m_data.data(), size);
         m_data = m_data.subspan(size);
     }
 
@@ -171,7 +161,7 @@ public:
     }
 
     [[nodiscard]] std::span<uint8_t> peek(size_t size) const noexcept {
-        return {&*m_data.begin(), &*m_data.begin() + size};
+        return m_data.first(size);
     }
 
     [[nodiscard]] uint8_t peek() const noexcept {
@@ -193,8 +183,7 @@ public:
 
     template <typename T>
     binary_writer& operator<<(const T& data) noexcept {
-        const auto bytes = detail::getBytes(data);
-        m_data.insert(m_data.end(), bytes.begin(), bytes.end());
+        detail::appendBytes(m_data, data);
         return *this;
     }
 
@@ -204,8 +193,7 @@ public:
 
     template <typename T>
     void write(const T& data) noexcept {
-        const auto bytes = detail::getBytes(data);
-        m_data.insert(m_data.end(), bytes.begin(), bytes.end());
+        detail::appendBytes(m_data, data);
     }
 
     void write(const std::vector<uint8_t>& data) noexcept {
