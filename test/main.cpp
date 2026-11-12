@@ -1,4 +1,5 @@
 #include "gdr/gdr.hpp"
+#include "gdr/physics_extension.hpp"
 
 #include <cstdint>
 #include <iostream>
@@ -277,6 +278,26 @@ static void testFilesAndBadData() {
     assert(res.unwrapErr().starts_with("Invalid magic"));
 }
 
+static void testPhysicsButtons() {
+    Replay<void, PhysicsInput> replay;
+    replay.inputs.emplace_back(4, 1, false, true, 1.f, 2.f, 3.f, 4.0, 5.0);
+    replay.inputs.emplace_back(6, 0, false, false, 6.f, 7.f, 8.f, 9.0, 10.0);
+    replay.inputs.emplace_back(9, 2, true, true, 0.f, 0.f, 0.f, 0.0, 0.0);
+
+    auto imported = Replay<void, PhysicsInput>::importData(replay.exportData().unwrap());
+    assert(imported.isOk());
+    const auto& inputs = imported.unwrap().inputs;
+    assert(inputs.size() == 3);
+    assert(inputs[0].button == 1); assert(inputs[0].xPosition == 1.f);
+    assert(inputs[1].button == 0); assert(!inputs[1].down); assert(inputs[1].yVelocity == 10.0);
+    assert(inputs[2].button == 2); assert(inputs[2].player2);
+
+    // readers without the button byte still see a jump
+    auto plain = Replay<>::importData(replay.exportData().unwrap());
+    assert(plain.isOk());
+    for (const auto& input : plain.unwrap().inputs) assert(input.button == 1);
+}
+
 int main() {
     testExtensions();
     testVarints();
@@ -290,6 +311,7 @@ int main() {
     testHugeFrameGaps();
     testCutOffFiles();
     testFilesAndBadData();
+    testPhysicsButtons();
     std::cout << "all tests passed" << std::endl;
     return 0;
 }

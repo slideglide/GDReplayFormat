@@ -15,9 +15,11 @@ struct PhysicsInput : gdr::Input<"Phys"> {
 
 	void parseExtension(binary_reader& reader) override {
 		reader >> xPosition >> yPosition >> rotation >> xVelocity >> yVelocity;
+		if (!reader.empty()) reader >> button;
 	}
 
 	void saveExtension(binary_writer& writer) const override {
 		writer << xPosition << yPosition << rotation << xVelocity << yVelocity;
+		if (button != 1) writer << button;
 	}
 };
